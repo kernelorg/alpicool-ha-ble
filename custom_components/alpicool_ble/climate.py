@@ -14,7 +14,6 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import FridgeApi
 from .const import (
-    CONF_DUAL_ZONE_MODES,
     DOMAIN,
     PRESET_ECO,
     PRESET_FREEZER,
@@ -59,9 +58,6 @@ class AlpicoolClimateZone(AlpicoolEntity, ClimateEntity):
         """Initialize the climate entity for a specific zone."""
         super().__init__(entry, api)
         self._zone = zone
-        # Read the configuration option selected by the user
-        self._has_fridge_freezer_mode = entry.data.get(CONF_DUAL_ZONE_MODES, False)
-
         self._attr_unique_id = f"{self._address}_{self._zone}"
         self._attr_name = f"{self._zone.capitalize()}"
 
@@ -72,8 +68,8 @@ class AlpicoolClimateZone(AlpicoolEntity, ClimateEntity):
 
     @property
     def preset_modes(self) -> list[str] | None:
-        """Return a list of available preset modes based on user configuration."""
-        if self._is_dual_zone and self._has_fridge_freezer_mode:
+        """Return a list of available preset modes."""
+        if self._is_dual_zone:
             return [PRESET_FRIDGE, PRESET_FREEZER]
         return [PRESET_MAX, PRESET_ECO]
 
@@ -83,12 +79,8 @@ class AlpicoolClimateZone(AlpicoolEntity, ClimateEntity):
         if not super().available:
             return False
 
-        # For configured dual-zone models, the right zone is only available in Freezer mode
-        if (
-            self._is_dual_zone
-            and self._has_fridge_freezer_mode
-            and self._zone == "right"
-        ):
+        # For dual-zone models, the right zone is only available in Freezer mode
+        if self._is_dual_zone and self._zone == "right":
             # run_mode 0 is Fridge, 1 is Freezer
             if self.api.status.get("run_mode") == 0:
                 return False
@@ -112,9 +104,9 @@ class AlpicoolClimateZone(AlpicoolEntity, ClimateEntity):
 
     @property
     def preset_mode(self) -> str | None:
-        """Return the current preset mode, adapted for user configuration."""
+        """Return the current preset mode."""
         run_mode = self.api.status.get("run_mode")
-        if self._is_dual_zone and self._has_fridge_freezer_mode:
+        if self._is_dual_zone:
             return PRESET_FREEZER if run_mode == 1 else PRESET_FRIDGE
         return PRESET_ECO if run_mode == 1 else PRESET_MAX
 
