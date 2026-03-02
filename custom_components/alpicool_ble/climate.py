@@ -8,8 +8,8 @@ from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import ClimateEntityFeature, HVACMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import FridgeApi
@@ -32,14 +32,26 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Alpicool climate entities based on initial status."""
     api: FridgeApi = hass.data[DOMAIN][entry.entry_id]
+    address = entry.data["address"]
 
-    entities = [AlpicoolClimateZone(entry, api, "left")]
+    async_add_entities([AlpicoolClimateZone(entry, api, "left")])
 
-    if "right_current" in api.status:
-        _LOGGER.debug("Dual-zone fridge detected, adding right zone entity")
-        entities.append(AlpicoolClimateZone(entry, api, "right"))
+    right_zone_added = "right_current" in api.status
+    if right_zone_added:
+        _LOGGER.debug("Dual-zone fridge detected at setup, adding right zone entity")
+        async_add_entities([AlpicoolClimateZone(entry, api, "right")])
 
-    async_add_entities(entities)
+    @callback
+    def _check_new_zone() -> None:
+        nonlocal right_zone_added
+        if not right_zone_added and "right_current" in api.status:
+            _LOGGER.debug("Dual-zone fridge detected via polling, adding right zone entity")
+            async_add_entities([AlpicoolClimateZone(entry, api, "right")])
+            right_zone_added = True
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, f"{DOMAIN}_{address}_update", _check_new_zone)
+    )
 
 
 class AlpicoolClimateZone(AlpicoolEntity, ClimateEntity):
