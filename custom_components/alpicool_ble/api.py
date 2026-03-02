@@ -240,6 +240,12 @@ class FridgeApi:
             else:
                 _LOGGER.debug("Unhandled command in notification: %s", cmd)
 
+    def _reset_client(self) -> None:
+        """Create a fresh BleakClient instance for reconnection."""
+        self._client = BleakClient(self._address, timeout=30.0)
+        self._write_requires_response = False
+        self._notification_buffer.clear()
+
     async def connect(self, is_reconnect: bool = False) -> bool:
         """Connect to the fridge and try to bind, with a fallback."""
         _LOGGER.debug("Attempting to connect")
@@ -358,6 +364,7 @@ class FridgeApi:
             try:
                 if not self._client.is_connected:
                     _LOGGER.debug("Device disconnected, attempting to reconnect")
+                    self._reset_client()
                     if await self.connect(is_reconnect=True):
                         _LOGGER.debug("Successfully reconnected to device")
                         self.is_available = True
@@ -398,4 +405,5 @@ class FridgeApi:
             except BleakError as e:
                 _LOGGER.debug("An unexpected BLE error occurred during polling: %s", e)
                 self.is_available = False
+                self._reset_client()
                 await asyncio.sleep(60)
