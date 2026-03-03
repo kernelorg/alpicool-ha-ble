@@ -88,16 +88,7 @@ class AlpicoolClimateZone(AlpicoolEntity, ClimateEntity):
     @property
     def available(self) -> bool:
         """Return True if the device and this specific zone are available."""
-        if not super().available:
-            return False
-
-        # For dual-zone models, the right zone is only available in Freezer mode
-        if self._is_dual_zone and self._zone == "right":
-            # run_mode 0 is Fridge, 1 is Freezer
-            if self.api.status.get("run_mode") == 0:
-                return False
-
-        return True
+        return super().available
 
     @property
     def hvac_mode(self) -> HVACMode | None:
