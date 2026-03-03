@@ -4,6 +4,7 @@ import logging
 
 from bleak.exc import BleakError
 
+from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -29,7 +30,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     address = entry.data["address"]
 
-    api = FridgeApi(address)
+    def ble_device_callback():
+        return async_ble_device_from_address(hass, address, connectable=True)
+
+    api = FridgeApi(address, ble_device_callback)
     hass.data[DOMAIN][entry.entry_id] = api
 
     try:
