@@ -36,6 +36,7 @@ class FridgeApi:
         self._notification_buffer = bytearray()
         self.is_available: bool = True
         self._last_successful_update_time: float = 0.0
+        self._consecutive_timeouts: int = 0
 
     @property
     def _is_connected(self) -> bool:
@@ -247,6 +248,16 @@ class FridgeApi:
             else:
                 _LOGGER.debug("Unhandled command in notification: %s", cmd)
 
+    async def _force_disconnect(self) -> None:
+        """Reset BLE connection state without cancelling the poll task."""
+        try:
+            if self._client and self._client.is_connected:
+                await self._client.disconnect()
+        except BleakError:
+            pass
+        self._client = None
+        self._notification_buffer.clear()
+
     def _reset_client(self) -> None:
         """Reset BLE client state before a new connection attempt."""
         self._client = None
@@ -350,15 +361,21 @@ class FridgeApi:
 
     async def _send_raw(self, packet: bytes):
         """Send raw packet to fridge, adapting write method."""
-        if not self._is_connected:
-            _LOGGER.debug("Cannot send, not connected")
-            return
-        _LOGGER.debug("--> SENDING: %s", packet.hex())
-        await self._client.write_gatt_char(
-            FRIDGE_RW_CHARACTERISTIC_UUID,
-            packet,
-            response=self._write_requires_response,
-        )
+        async with self._lock:
+            if not self._is_connected:
+                _LOGGER.debug("Cannot send, not connected")
+                return
+            _LOGGER.debug("--> SENDING: %s", packet.hex())
+            try:
+                await self._client.write_gatt_char(
+                    FRIDGE_RW_CHARACTERISTIC_UUID,
+                    packet,
+                    response=self._write_requires_response,
+                )
+            except BleakError as e:
+                _LOGGER.warning("Write failed, forcing reconnect: %s", e)
+                await self._force_disconnect()
+                raise
 
     async def update_status(self) -> bool:
         """Request status and wait for notification. Returns True on success, False on timeout."""
@@ -371,9 +388,20 @@ class FridgeApi:
         try:
             await asyncio.wait_for(self._status_updated_event.wait(), timeout=5)
         except TimeoutError:
-            _LOGGER.debug("Timeout waiting for status update")
+            self._consecutive_timeouts += 1
+            _LOGGER.debug(
+                "Timeout waiting for status update (consecutive: %d)",
+                self._consecutive_timeouts,
+            )
+            if self._consecutive_timeouts >= 3:
+                _LOGGER.warning(
+                    "3 consecutive timeouts, forcing reconnect"
+                )
+                await self._force_disconnect()
+                self._consecutive_timeouts = 0
             return False
         else:
+            self._consecutive_timeouts = 0
             return True
 
     async def start_polling(self, update_callback):
