@@ -3,9 +3,8 @@ substitutions:
   friendly_name: Alpicool Fridge
   fridge_mac: "FF:22:08:22:45:66"
 
-  # BLE UUIDs
-  svc_uuid:   "00001234-0000-1000-8000-00805f9b34fb"
-  rw_uuid:    "00001235-0000-1000-8000-00805f9b34fb"
+  # BLE characteristic UUIDs (confirmed from HA integration source)
+  rw_uuid:     "00001235-0000-1000-8000-00805f9b34fb"
   notify_uuid: "00001236-0000-1000-8000-00805f9b34fb"
 
 esphome:
@@ -172,14 +171,12 @@ ble_client:
         # BIND: 0xfe 0xfe 0x03 0x00 0x01 0xff
         - ble_client.ble_write:
             id: alpicool_ble
-            service_uuid: ${svc_uuid}
             characteristic_uuid: ${rw_uuid}
             value: [0xfe, 0xfe, 0x03, 0x00, 0x01, 0xff]
         - delay: 500ms
         # QUERY: 0xfe 0xfe 0x03 0x01 0x02 0x00
         - ble_client.ble_write:
             id: alpicool_ble
-            service_uuid: ${svc_uuid}
             characteristic_uuid: ${rw_uuid}
             value: [0xfe, 0xfe, 0x03, 0x01, 0x02, 0x00]
     on_disconnect:
@@ -198,7 +195,6 @@ interval:
           then:
             - ble_client.ble_write:
                 id: alpicool_ble
-                service_uuid: ${svc_uuid}
                 characteristic_uuid: ${rw_uuid}
                 value: [0xfe, 0xfe, 0x03, 0x01, 0x02, 0x00]
 
@@ -213,7 +209,6 @@ sensor:
     id: alpicool_notify_raw
     name: "Alpicool Notify"
     internal: true
-    service_uuid: ${svc_uuid}
     characteristic_uuid: ${notify_uuid}
     notify: true
     lambda: |-
@@ -242,9 +237,9 @@ sensor:
         uint8_t cmd = buf[3];
 
         if (cmd == 0x01) {
-          // QUERY response — payload starts at byte 4, ends 2 bytes before packet end (checksum)
+          // QUERY response — payload starts at byte 4, ends 2 bytes before end (checksum)
           const uint8_t* p = buf.data() + 4;
-          size_t payload_len = pkt_size >= 6 ? pkt_size - 6 : 0; // exclude header, len, cmd, checksum
+          size_t payload_len = pkt_size >= 6 ? pkt_size - 6 : 0;
 
           // Helper: convert unsigned byte to signed int
           auto s = [](uint8_t b) -> int { return (b > 127) ? (int)b - 256 : (int)b; };
@@ -350,7 +345,6 @@ number:
     set_action:
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_temp_packet(0x05, (int)x);
@@ -366,7 +360,6 @@ number:
     set_action:
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_temp_packet(0x06, (int)x);
@@ -382,7 +375,6 @@ switch:
       - lambda: id(g_powered_on) = true;
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_packet(
@@ -397,7 +389,6 @@ switch:
       - lambda: id(g_powered_on) = false;
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_packet(
@@ -418,7 +409,6 @@ switch:
       - lambda: id(g_locked) = true;
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_packet(
@@ -433,7 +423,6 @@ switch:
       - lambda: id(g_locked) = false;
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_packet(
@@ -445,7 +434,7 @@ switch:
               id(g_right_target), id(g_right_ret_diff),
               id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
 
-# ── Select entity (run mode / battery saver) ──────────────────────────────────
+# ── Select entities ───────────────────────────────────────────────────────────
 
 select:
   - platform: template
@@ -462,7 +451,6 @@ select:
       - lambda: id(g_run_mode) = (x == "Eco / Freezer") ? 1 : 0;
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_packet(
@@ -495,7 +483,6 @@ select:
           else id(g_bat_saver) = 0;
       - ble_client.ble_write:
           id: alpicool_ble
-          service_uuid: ${svc_uuid}
           characteristic_uuid: ${rw_uuid}
           value: !lambda |-
             return alpicool_set_packet(
