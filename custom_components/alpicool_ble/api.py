@@ -269,16 +269,20 @@ class FridgeApi:
         _LOGGER.debug("Attempting to connect")
         try:
             ble_device = self._ble_device_callback()
-            if ble_device is None:
-                _LOGGER.debug("BLE device %s not found in scanner", self._address)
-                return False
-
-            self._client = await establish_connection(
-                BleakClient,
-                ble_device,
-                self._address,
-                ble_device_callback=self._ble_device_callback,
-            )
+            if ble_device is not None:
+                self._client = await establish_connection(
+                    BleakClient,
+                    ble_device,
+                    self._address,
+                    ble_device_callback=self._ble_device_callback,
+                )
+            else:
+                _LOGGER.debug(
+                    "Device %s not in scanner cache, trying direct connection",
+                    self._address,
+                )
+                self._client = BleakClient(self._address, timeout=30.0)
+                await self._client.connect()
 
             _LOGGER.debug("Discovering services and characteristics")
             write_char = None
