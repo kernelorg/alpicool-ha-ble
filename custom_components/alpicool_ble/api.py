@@ -248,10 +248,16 @@ class FridgeApi:
             else:
                 _LOGGER.debug("Unhandled command in notification: %s", cmd)
 
+    def _on_disconnected(self, client: BleakClient) -> None:
+        """Called immediately when the BLE proxy drops the connection."""
+        _LOGGER.warning("BLE device %s disconnected (proxy signal)", self._address)
+        self._notification_buffer.clear()
+
     async def _force_disconnect(self) -> None:
         """Reset BLE connection state without cancelling the poll task."""
         try:
-            if self._client and self._client.is_connected:
+            if self._client:
+                # Always send disconnect — ensures ESPHome proxy clears its state
                 await self._client.disconnect()
         except BleakError:
             pass
@@ -275,6 +281,7 @@ class FridgeApi:
                     ble_device,
                     self._address,
                     ble_device_callback=self._ble_device_callback,
+                    disconnected_callback=self._on_disconnected,
                 )
             else:
                 _LOGGER.debug(
@@ -416,8 +423,9 @@ class FridgeApi:
         while True:
             try:
                 if not self._is_connected:
-                    _LOGGER.debug("Device disconnected, attempting to reconnect")
-                    self._reset_client()
+                    _LOGGER.debug("Device disconnected, waiting 5s before reconnect")
+                    await self._force_disconnect()
+                    await asyncio.sleep(5)
                     if await self.connect(is_reconnect=True):
                         _LOGGER.debug("Successfully reconnected to device")
                         self.is_available = True
