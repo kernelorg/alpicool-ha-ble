@@ -1,0 +1,508 @@
+substitutions:
+  device_name: alpicool-fridge
+  friendly_name: Alpicool Fridge
+  fridge_mac: "FF:22:08:22:45:66"
+
+  # BLE UUIDs
+  svc_uuid:   "00001234-0000-1000-8000-00805f9b34fb"
+  rw_uuid:    "00001235-0000-1000-8000-00805f9b34fb"
+  notify_uuid: "00001236-0000-1000-8000-00805f9b34fb"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  includes:
+    - alpicool_helpers.h
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name} Fallback"
+    password: !secret ap_password
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+
+esp32_ble_tracker:
+
+# ── State storage ────────────────────────────────────────────────────────────
+
+globals:
+  # Current temperatures
+  - id: g_left_current
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_right_current
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Target temperatures
+  - id: g_left_target
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_right_target
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Control state
+  - id: g_powered_on
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: g_locked
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: g_run_mode
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_bat_saver
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Limits and calibration (read from device, preserved for SET commands)
+  - id: g_temp_max
+    type: int
+    restore_value: no
+    initial_value: '20'
+  - id: g_temp_min
+    type: int
+    restore_value: no
+    initial_value: '-20'
+  - id: g_left_ret_diff
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: g_right_ret_diff
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: g_start_delay
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Factory temperature calibration offsets (read-only, passed through in SET)
+  - id: g_left_tc_hot
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_left_tc_mid
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_left_tc_cold
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_left_tc_halt
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_right_tc_hot
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_right_tc_mid
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_right_tc_cold
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_right_tc_halt
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Battery
+  - id: g_bat_percent
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_bat_vol_int
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_bat_vol_dec
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Dual-zone detection flag
+  - id: g_dual_zone
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Packet reassembly buffer
+  - id: pkt_buf
+    type: std::vector<uint8_t>
+    restore_value: no
+
+# ── BLE connection ────────────────────────────────────────────────────────────
+
+ble_client:
+  - mac_address: ${fridge_mac}
+    id: alpicool_ble
+    on_connect:
+      then:
+        - logger.log: "Alpicool: connected — sending BIND"
+        - delay: 500ms
+        # BIND: 0xfe 0xfe 0x03 0x00 0x01 0xff
+        - ble_client.ble_write:
+            id: alpicool_ble
+            service_uuid: ${svc_uuid}
+            characteristic_uuid: ${rw_uuid}
+            value: [0xfe, 0xfe, 0x03, 0x00, 0x01, 0xff]
+        - delay: 500ms
+        # QUERY: 0xfe 0xfe 0x03 0x01 0x02 0x00
+        - ble_client.ble_write:
+            id: alpicool_ble
+            service_uuid: ${svc_uuid}
+            characteristic_uuid: ${rw_uuid}
+            value: [0xfe, 0xfe, 0x03, 0x01, 0x02, 0x00]
+    on_disconnect:
+      then:
+        - logger.log: "Alpicool: disconnected"
+        - lambda: id(pkt_buf).clear();
+
+# ── Periodic polling ──────────────────────────────────────────────────────────
+
+interval:
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            ble_client.connected: alpicool_ble
+          then:
+            - ble_client.ble_write:
+                id: alpicool_ble
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${rw_uuid}
+                value: [0xfe, 0xfe, 0x03, 0x01, 0x02, 0x00]
+
+# ── Sensors ───────────────────────────────────────────────────────────────────
+
+sensor:
+  # ── Notification handler ─────────────────────────────────────────────────
+  # Receives raw BLE notifications, reassembles fragmented packets,
+  # parses the Alpicool protocol and updates all other sensors/entities.
+  - platform: ble_client
+    ble_client_id: alpicool_ble
+    id: alpicool_notify_raw
+    name: "Alpicool Notify"
+    internal: true
+    service_uuid: ${svc_uuid}
+    characteristic_uuid: ${notify_uuid}
+    notify: true
+    lambda: |-
+      // Accumulate bytes into the reassembly buffer
+      auto& buf = id(pkt_buf);
+      buf.insert(buf.end(), x.begin(), x.end());
+
+      // Process all complete packets in the buffer
+      while (true) {
+        // Find the 0xfe 0xfe header
+        size_t start = 0;
+        while (start + 1 < buf.size()) {
+          if (buf[start] == 0xfe && buf[start + 1] == 0xfe) break;
+          start++;
+        }
+        if (start > 0)
+          buf.erase(buf.begin(), buf.begin() + start);
+
+        // Need at least: header(2) + length(1) + cmd(1) = 4 bytes
+        if (buf.size() < 4) break;
+
+        uint8_t len_byte = buf[2];
+        size_t pkt_size = 3 + (size_t)len_byte; // header(2) + len(1) + rest
+        if (buf.size() < pkt_size) break;        // wait for more data
+
+        uint8_t cmd = buf[3];
+
+        if (cmd == 0x01) {
+          // QUERY response — payload starts at byte 4, ends 2 bytes before packet end (checksum)
+          const uint8_t* p = buf.data() + 4;
+          size_t payload_len = pkt_size >= 6 ? pkt_size - 6 : 0; // exclude header, len, cmd, checksum
+
+          // Helper: convert unsigned byte to signed int
+          auto s = [](uint8_t b) -> int { return (b > 127) ? (int)b - 256 : (int)b; };
+
+          if (payload_len >= 18) {
+            id(g_locked)        = (bool)p[0];
+            id(g_powered_on)    = (bool)p[1];
+            id(g_run_mode)      = (int)p[2];
+            id(g_bat_saver)     = (int)p[3];
+            id(g_left_target)   = s(p[4]);
+            id(g_temp_max)      = s(p[5]);
+            id(g_temp_min)      = s(p[6]);
+            id(g_left_ret_diff) = s(p[7]);
+            id(g_start_delay)   = (int)p[8];
+            id(g_left_tc_hot)   = s(p[10]);
+            id(g_left_tc_mid)   = s(p[11]);
+            id(g_left_tc_cold)  = s(p[12]);
+            id(g_left_tc_halt)  = s(p[13]);
+            id(g_left_current)  = s(p[14]);
+            id(g_bat_percent)   = (int)p[15];
+            id(g_bat_vol_int)   = (int)p[16];
+            id(g_bat_vol_dec)   = (int)p[17];
+
+            id(left_temp).publish_state((float)id(g_left_current));
+            id(left_target_num).publish_state((float)id(g_left_target));
+            id(battery_pct).publish_state((float)id(g_bat_percent));
+            id(battery_volt).publish_state(
+              (float)id(g_bat_vol_int) + (float)id(g_bat_vol_dec) / 10.0f);
+            id(power_sw).publish_state(id(g_powered_on));
+            id(lock_sw).publish_state(id(g_locked));
+          }
+
+          if (payload_len >= 27) {
+            id(g_dual_zone)      = true;
+            id(g_right_target)   = s(p[18]);
+            id(g_right_ret_diff) = s(p[21]);
+            id(g_right_tc_hot)   = s(p[22]);
+            id(g_right_tc_mid)   = s(p[23]);
+            id(g_right_tc_cold)  = s(p[24]);
+            id(g_right_tc_halt)  = s(p[25]);
+            id(g_right_current)  = s(p[26]);
+
+            id(right_temp).publish_state((float)id(g_right_current));
+            id(right_target_num).publish_state((float)id(g_right_target));
+          }
+        }
+
+        buf.erase(buf.begin(), buf.begin() + pkt_size);
+      }
+      return NAN; // sensor value unused; we use publish_state above
+
+  # ── Temperature sensors ───────────────────────────────────────────────────
+  - platform: template
+    id: left_temp
+    name: "Left Temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    id: right_temp
+    name: "Right Temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+
+  # ── Battery sensors ───────────────────────────────────────────────────────
+  - platform: template
+    id: battery_pct
+    name: "Battery"
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: battery_volt
+    name: "Battery Voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: never
+
+# ── Number entities (target temperatures) ────────────────────────────────────
+
+number:
+  - platform: template
+    id: left_target_num
+    name: "Left Target Temperature"
+    unit_of_measurement: "°C"
+    min_value: -20
+    max_value: 20
+    step: 1
+    update_interval: never
+    set_action:
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_temp_packet(0x05, (int)x);
+
+  - platform: template
+    id: right_target_num
+    name: "Right Target Temperature"
+    unit_of_measurement: "°C"
+    min_value: -20
+    max_value: 20
+    step: 1
+    update_interval: never
+    set_action:
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_temp_packet(0x06, (int)x);
+
+# ── Switch entities ───────────────────────────────────────────────────────────
+
+switch:
+  - platform: template
+    id: power_sw
+    name: "Power"
+    lambda: return id(g_powered_on);
+    turn_on_action:
+      - lambda: id(g_powered_on) = true;
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_packet(
+              id(g_locked), true, id(g_run_mode), id(g_bat_saver),
+              id(g_left_target), id(g_temp_max), id(g_temp_min), id(g_left_ret_diff),
+              id(g_start_delay),
+              id(g_left_tc_hot), id(g_left_tc_mid), id(g_left_tc_cold), id(g_left_tc_halt),
+              id(g_dual_zone),
+              id(g_right_target), id(g_right_ret_diff),
+              id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
+    turn_off_action:
+      - lambda: id(g_powered_on) = false;
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_packet(
+              id(g_locked), false, id(g_run_mode), id(g_bat_saver),
+              id(g_left_target), id(g_temp_max), id(g_temp_min), id(g_left_ret_diff),
+              id(g_start_delay),
+              id(g_left_tc_hot), id(g_left_tc_mid), id(g_left_tc_cold), id(g_left_tc_halt),
+              id(g_dual_zone),
+              id(g_right_target), id(g_right_ret_diff),
+              id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
+
+  - platform: template
+    id: lock_sw
+    name: "Lock"
+    entity_category: config
+    lambda: return id(g_locked);
+    turn_on_action:
+      - lambda: id(g_locked) = true;
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_packet(
+              true, id(g_powered_on), id(g_run_mode), id(g_bat_saver),
+              id(g_left_target), id(g_temp_max), id(g_temp_min), id(g_left_ret_diff),
+              id(g_start_delay),
+              id(g_left_tc_hot), id(g_left_tc_mid), id(g_left_tc_cold), id(g_left_tc_halt),
+              id(g_dual_zone),
+              id(g_right_target), id(g_right_ret_diff),
+              id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
+    turn_off_action:
+      - lambda: id(g_locked) = false;
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_packet(
+              false, id(g_powered_on), id(g_run_mode), id(g_bat_saver),
+              id(g_left_target), id(g_temp_max), id(g_temp_min), id(g_left_ret_diff),
+              id(g_start_delay),
+              id(g_left_tc_hot), id(g_left_tc_mid), id(g_left_tc_cold), id(g_left_tc_halt),
+              id(g_dual_zone),
+              id(g_right_target), id(g_right_ret_diff),
+              id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
+
+# ── Select entity (run mode / battery saver) ──────────────────────────────────
+
+select:
+  - platform: template
+    id: run_mode_select
+    name: "Mode"
+    options:
+      - "Max / Fridge"
+      - "Eco / Freezer"
+    lambda: |-
+      return id(g_run_mode) == 1
+        ? std::string("Eco / Freezer")
+        : std::string("Max / Fridge");
+    set_action:
+      - lambda: id(g_run_mode) = (x == "Eco / Freezer") ? 1 : 0;
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_packet(
+              id(g_locked), id(g_powered_on), id(g_run_mode), id(g_bat_saver),
+              id(g_left_target), id(g_temp_max), id(g_temp_min), id(g_left_ret_diff),
+              id(g_start_delay),
+              id(g_left_tc_hot), id(g_left_tc_mid), id(g_left_tc_cold), id(g_left_tc_halt),
+              id(g_dual_zone),
+              id(g_right_target), id(g_right_ret_diff),
+              id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
+
+  - platform: template
+    id: bat_saver_select
+    name: "Battery Protection"
+    entity_category: config
+    options:
+      - "Low"
+      - "Medium"
+      - "High"
+    lambda: |-
+      switch (id(g_bat_saver)) {
+        case 1: return std::string("Medium");
+        case 2: return std::string("High");
+        default: return std::string("Low");
+      }
+    set_action:
+      - lambda: |-
+          if (x == "Medium") id(g_bat_saver) = 1;
+          else if (x == "High") id(g_bat_saver) = 2;
+          else id(g_bat_saver) = 0;
+      - ble_client.ble_write:
+          id: alpicool_ble
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${rw_uuid}
+          value: !lambda |-
+            return alpicool_set_packet(
+              id(g_locked), id(g_powered_on), id(g_run_mode), id(g_bat_saver),
+              id(g_left_target), id(g_temp_max), id(g_temp_min), id(g_left_ret_diff),
+              id(g_start_delay),
+              id(g_left_tc_hot), id(g_left_tc_mid), id(g_left_tc_cold), id(g_left_tc_halt),
+              id(g_dual_zone),
+              id(g_right_target), id(g_right_ret_diff),
+              id(g_right_tc_hot), id(g_right_tc_mid), id(g_right_tc_cold), id(g_right_tc_halt));
